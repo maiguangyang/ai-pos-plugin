@@ -1,0 +1,24 @@
+name: easypos_demo_integration
+description: Shared demo business and AI POS plugin adapter.
+version: 0.3.0
+publish_to: "none"
+
+environment:
+  sdk: ">=3.8.1"
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ai_pos_plugin_api:
+    path: ../../../../core/ai_pos_plugin_api
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  ai_pos_plugin_testkit:
+    path: ../../../../core/ai_pos_plugin_testkit
+
+flutter:
+  uses-material-design: true

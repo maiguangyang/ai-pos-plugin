@@ -1,0 +1,9 @@
+schema_version: 1
+template_version: 0
+name: easypos_demo
+organization: com.sjfood
+plugin_id: com.sjfood.easypos.demo
+integration_package: easypos_demo_integration
+standalone_app: easypos_demo_app
+display_name: EasyPOS Demo
+platforms: [android, ios]

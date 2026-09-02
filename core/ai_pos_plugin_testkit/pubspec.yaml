@@ -1,0 +1,20 @@
+name: ai_pos_plugin_testkit
+description: Contract verification and import-boundary tools for AI POS integrations.
+version: 0.3.0
+publish_to: "none"
+
+environment:
+  sdk: ">=3.8.1"
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ai_pos_plugin_api:
+    path: ../ai_pos_plugin_api
+  yaml: ^3.1.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

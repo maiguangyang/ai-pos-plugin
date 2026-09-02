@@ -1,0 +1,17 @@
+name: ai_pos_floating_workspace
+description: Business-neutral floating session workspace for AI POS Flutter hosts.
+version: 0.1.0
+publish_to: "none"
+
+environment:
+  sdk: ">=3.8.1"
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

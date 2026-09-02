@@ -1,0 +1,6 @@
+**/.dart_tool/
+**/build/
+core/**/pubspec.lock
+example/plugin_host/packages/**/pubspec.lock
+example/plugin_host/.flutter-plugins
+example/plugin_host/.flutter-plugins-dependencies

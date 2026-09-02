@@ -1,0 +1,26 @@
+name: ai_pos_plugin_host
+description: Development host for compile-time AI POS integrations.
+publish_to: "none"
+version: 0.3.0+1
+
+environment:
+  sdk: ">=3.8.1"
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ai_pos_plugin_api:
+    path: ../../core/ai_pos_plugin_api
+  ai_pos_plugin_runtime:
+    path: ../../core/ai_pos_plugin_runtime
+  ai_pos_example_plugin:
+    path: packages/ai_pos_example_plugin
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
