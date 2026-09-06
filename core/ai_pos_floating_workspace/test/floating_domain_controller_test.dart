@@ -3,6 +3,47 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'interactive dismiss forwards normalized id and retention option to host',
+    () async {
+      final controller = _controller();
+      final delegate = _RecordingDomainHost();
+      controller.attachHost(delegate);
+
+      final result = await controller.beginInteractiveDismiss(
+        foregroundSessionId: '  agent-c  ',
+        keepForegroundAsFloating: true,
+      );
+
+      expect(delegate.dismissController, same(controller));
+      expect(delegate.dismissForegroundSessionId, 'agent-c');
+      expect(delegate.dismissKeepForegroundAsFloating, isTrue);
+      expect(result, same(delegate.handle));
+    },
+  );
+
+  test(
+    'interactive dismiss fails closed while detached and rejects empty ids',
+    () {
+      final controller = _controller();
+
+      expect(
+        controller.beginInteractiveDismiss(
+          foregroundSessionId: 'agent-c',
+          keepForegroundAsFloating: false,
+        ),
+        completion(isNull),
+      );
+      expect(
+        () => controller.beginInteractiveDismiss(
+          foregroundSessionId: ' ',
+          keepForegroundAsFloating: false,
+        ),
+        throwsArgumentError,
+      );
+    },
+  );
+
+  test(
     'interactive switch forwards normalized ids and options to host',
     () async {
       final controller = _controller();
@@ -108,10 +149,25 @@ FloatingDomainController _controller() {
 final class _RecordingDomainHost implements FloatingDomainHostDelegate {
   final handle = _FakeSwitchHandle();
   FloatingDomainController? controller;
+  FloatingDomainController? dismissController;
   String? foregroundSessionId;
+  String? dismissForegroundSessionId;
   String? targetSessionId;
   FloatingSessionSwitchDirection? direction;
   bool? keepForegroundAsFloating;
+  bool? dismissKeepForegroundAsFloating;
+
+  @override
+  Future<FloatingSessionSwitchHandle?> beginInteractiveDismiss(
+    FloatingDomainController controller, {
+    required String foregroundSessionId,
+    required bool keepForegroundAsFloating,
+  }) async {
+    dismissController = controller;
+    dismissForegroundSessionId = foregroundSessionId;
+    dismissKeepForegroundAsFloating = keepForegroundAsFloating;
+    return handle;
+  }
 
   @override
   Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch(

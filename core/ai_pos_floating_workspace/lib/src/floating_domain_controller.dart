@@ -10,6 +10,12 @@ abstract interface class FloatingDomainHostDelegate {
 
   Future<void> closeAll(FloatingDomainController controller);
 
+  Future<FloatingSessionSwitchHandle?> beginInteractiveDismiss(
+    FloatingDomainController controller, {
+    required String foregroundSessionId,
+    required bool keepForegroundAsFloating,
+  });
+
   Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch(
     FloatingDomainController controller, {
     required String foregroundSessionId,
@@ -51,6 +57,29 @@ final class FloatingDomainController {
 
   Future<void> closeAll() {
     return _delegate?.closeAll(this) ?? Future<void>.value();
+  }
+
+  Future<FloatingSessionSwitchHandle?> beginInteractiveDismiss({
+    required String foregroundSessionId,
+    required bool keepForegroundAsFloating,
+  }) {
+    final normalizedForegroundId = foregroundSessionId.trim();
+    if (normalizedForegroundId.isEmpty) {
+      throw ArgumentError.value(
+        foregroundSessionId,
+        'foregroundSessionId',
+        'must not be empty',
+      );
+    }
+    final delegate = _delegate;
+    if (delegate == null) {
+      return Future<FloatingSessionSwitchHandle?>.value();
+    }
+    return delegate.beginInteractiveDismiss(
+      this,
+      foregroundSessionId: normalizedForegroundId,
+      keepForegroundAsFloating: keepForegroundAsFloating,
+    );
   }
 
   Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch({

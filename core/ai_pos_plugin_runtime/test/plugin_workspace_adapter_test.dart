@@ -170,6 +170,13 @@ final class _FakeDomainHost implements FloatingDomainHostDelegate {
       controller.detachHost(this);
 
   @override
+  Future<FloatingSessionSwitchHandle?> beginInteractiveDismiss(
+    FloatingDomainController controller, {
+    required String foregroundSessionId,
+    required bool keepForegroundAsFloating,
+  }) async => null;
+
+  @override
   Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch(
     FloatingDomainController controller, {
     required String foregroundSessionId,

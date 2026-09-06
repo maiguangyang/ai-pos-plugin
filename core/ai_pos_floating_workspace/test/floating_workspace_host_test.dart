@@ -6,6 +6,262 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('interactive dismiss follows raw drag progress', (tester) async {
+    const sourceRect = Rect.fromLTWH(24, 80, 72, 72);
+    final harness = await _pumpHost(tester);
+    unawaited(
+      harness.agent.open(
+        _request(
+          'agent',
+          'a',
+          animateInitialPresentation: true,
+          launchOrigin: const FloatingSessionLaunchOrigin(
+            sourceRect: sourceRect,
+            viewportSize: Size(800, 600),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final begin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'a',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    final handle = (await begin)!;
+    handle.updateProgress(0.35);
+    await tester.pump();
+
+    final snapshot = find.descendant(
+      of: find.byKey(
+        const Key('ai-pos-floating-workspace-interactive-dismiss-projection'),
+      ),
+      matching: find.byWidgetPredicate(
+        (widget) => widget is ColoredBox && widget.color == Colors.blue,
+      ),
+    );
+    expect(snapshot, findsOneWidget);
+    final viewport =
+        Offset.zero & (tester.view.physicalSize / tester.view.devicePixelRatio);
+    _expectRectClose(
+      tester.getRect(snapshot),
+      Rect.lerp(viewport, sourceRect, 0.35)!,
+      epsilon: 0.01,
+    );
+    expect(handle.progress, 0.35);
+
+    final cancel = handle.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+  });
+
+  testWidgets('interactive dismiss completion closes the foreground', (
+    tester,
+  ) async {
+    var closed = 0;
+    var disposed = 0;
+    final harness = await _pumpHost(
+      tester,
+      capture: (_, _) async => FloatingSnapshot.memory(
+        width: 100,
+        height: 160,
+        builder: ({key, required fit}) =>
+            ColoredBox(key: key, color: Colors.blue),
+        onDispose: () => disposed += 1,
+      ),
+    );
+    unawaited(
+      harness.agent.open(_request('agent', 'a', onClosed: (_) => closed += 1)),
+    );
+    await tester.pumpAndSettle();
+
+    final begin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'a',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    final handle = (await begin)!..updateProgress(0.75);
+    final settle = handle.settle(velocityX: 0);
+    await tester.pumpAndSettle();
+
+    expect(await settle, FloatingSessionSwitchOutcome.completed);
+    expect(closed, 1);
+    expect(disposed, 1);
+    expect(harness.agent.sessionCount, 0);
+    expect(find.text('agent-a'), findsNothing);
+  });
+
+  testWidgets('interactive dismiss completion retains a floating foreground', (
+    tester,
+  ) async {
+    var disposed = 0;
+    final visibility = <FloatingSessionVisibility>[];
+    final harness = await _pumpHost(
+      tester,
+      capture: (_, _) async => FloatingSnapshot.memory(
+        width: 100,
+        height: 160,
+        builder: ({key, required fit}) =>
+            ColoredBox(key: key, color: Colors.blue),
+        onDispose: () => disposed += 1,
+      ),
+    );
+    unawaited(
+      harness.agent.open(
+        _request('agent', 'a', onVisibilityChanged: visibility.add),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final begin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'a',
+      keepForegroundAsFloating: true,
+    );
+    await tester.pump();
+    final handle = (await begin)!..updateProgress(0.75);
+    final settle = handle.settle(velocityX: 0);
+    await tester.pumpAndSettle();
+
+    expect(await settle, FloatingSessionSwitchOutcome.completed);
+    expect(visibility, [
+      FloatingSessionVisibility.foreground,
+      FloatingSessionVisibility.floating,
+    ]);
+    expect(disposed, 0);
+    expect(harness.agent.sessionCount, 1);
+    const key = FloatingSessionKey(domainId: 'agent', sessionId: 'a');
+    expect(
+      find.byKey(FloatingWorkspaceHost.foregroundSessionKey(key)),
+      findsNothing,
+    );
+    expect(find.byKey(FloatingDock.cardKey(key)), findsOneWidget);
+
+    final cleanup = harness.agent.closeAll();
+    await tester.pumpAndSettle();
+    await cleanup;
+    expect(disposed, 1);
+  });
+
+  testWidgets('closeAll cancels interactive dismiss before cleanup', (
+    tester,
+  ) async {
+    final harness = await _pumpHost(tester);
+    unawaited(harness.agent.open(_request('agent', 'a')));
+    await tester.pumpAndSettle();
+
+    final begin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'a',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    (await begin)!.updateProgress(0.35);
+    await tester.pump();
+    expect(
+      find.byKey(FloatingWorkspaceHost.interactiveDismissProjectionKey),
+      findsOneWidget,
+    );
+
+    final cleanup = harness.agent.closeAll();
+    await tester.pumpAndSettle();
+    await cleanup;
+
+    expect(harness.agent.sessionCount, 0);
+    expect(
+      find.byKey(FloatingWorkspaceHost.interactiveDismissProjectionKey),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('interactive dismiss blocks overlapping opens', (tester) async {
+    final harness = await _pumpHost(tester);
+    unawaited(harness.agent.open(_request('agent', 'a')));
+    await tester.pumpAndSettle();
+
+    final begin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'a',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    final handle = (await begin)!;
+
+    expect(() => harness.agent.open(_request('agent', 'b')), throwsStateError);
+
+    final cancel = handle.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+  });
+
+  testWidgets('interactive switch rejects an active dismiss', (tester) async {
+    final harness = await _pumpHost(tester);
+    await _openFloatingThenForeground(tester, harness.agent);
+
+    final dismissBegin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'b',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    final dismiss = (await dismissBegin)!;
+
+    final interactiveSwitch = await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.right,
+      keepForegroundAsFloating: false,
+    );
+
+    expect(interactiveSwitch, isNull);
+    final cancel = dismiss.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+  });
+
+  testWidgets('float action is ignored during interactive dismiss', (
+    tester,
+  ) async {
+    late FloatingSessionActions actions;
+    final visibility = <FloatingSessionVisibility>[];
+    final harness = await _pumpHost(tester);
+    unawaited(
+      harness.agent.open(
+        FloatingSessionRequest(
+          key: const FloatingSessionKey(domainId: 'agent', sessionId: 'a'),
+          title: 'agent-a',
+          pageBuilder: (_, value) {
+            actions = value;
+            return const Material(child: Text('agent-a'));
+          },
+          maybePopNested: () async => false,
+          onVisibilityChanged: visibility.add,
+          onClosed: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final begin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'a',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    final dismiss = (await begin)!;
+
+    final floatAttempt = actions.float();
+    await tester.pump();
+    await tester.pump();
+
+    expect(visibility, [FloatingSessionVisibility.foreground]);
+    expect(
+      find.byKey(FloatingWorkspaceHost.interactiveDismissProjectionKey),
+      findsOneWidget,
+    );
+    final cancel = dismiss.cancel();
+    await tester.pumpAndSettle();
+    await floatAttempt;
+    await cancel;
+  });
+
   testWidgets('interactive restore follows raw progress without recapture', (
     tester,
   ) async {
