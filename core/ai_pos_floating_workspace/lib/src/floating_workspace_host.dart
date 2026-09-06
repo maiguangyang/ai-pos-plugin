@@ -1391,7 +1391,10 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
   }
 
   Future<void> _restore(_SessionEntry entry, {Rect? sourceRect}) {
-    if (_interactiveSwitch != null || _interactiveSwitchStarting) {
+    if (_interactiveDismiss != null ||
+        _interactiveDismissStarting ||
+        _interactiveSwitch != null ||
+        _interactiveSwitchStarting) {
       return Future<void>.value();
     }
     final current = entry.restoreFuture;

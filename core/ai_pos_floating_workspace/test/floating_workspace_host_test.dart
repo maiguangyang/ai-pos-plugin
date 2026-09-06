@@ -217,6 +217,39 @@ void main() {
     await cancel;
   });
 
+  testWidgets('floating restore is ignored during interactive dismiss', (
+    tester,
+  ) async {
+    const floatingKey = FloatingSessionKey(domainId: 'agent', sessionId: 'a');
+    const foregroundKey = FloatingSessionKey(domainId: 'agent', sessionId: 'b');
+    final harness = await _pumpHost(tester);
+    await _openFloatingThenForeground(tester, harness.agent);
+    await tester.tap(find.byKey(FloatingDock.dockHitTargetKey));
+    await tester.pumpAndSettle();
+
+    final dismissBegin = harness.agent.beginInteractiveDismiss(
+      foregroundSessionId: 'b',
+      keepForegroundAsFloating: false,
+    );
+    await tester.pump();
+    final dismiss = (await dismissBegin)!..updateProgress(0.35);
+    await tester.pump();
+
+    await tester.tap(find.byKey(FloatingDock.cardKey(floatingKey)));
+    await tester.pumpAndSettle();
+
+    final cancel = dismiss.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+
+    expect(harness.agent.sessionCount, 2);
+    expect(
+      find.byKey(FloatingWorkspaceHost.foregroundSessionKey(foregroundKey)),
+      findsOneWidget,
+    );
+    expect(find.byKey(FloatingDock.cardKey(floatingKey)), findsOneWidget);
+  });
+
   testWidgets('float action is ignored during interactive dismiss', (
     tester,
   ) async {
