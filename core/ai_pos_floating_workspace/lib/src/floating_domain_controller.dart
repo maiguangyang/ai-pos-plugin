@@ -10,6 +10,14 @@ abstract interface class FloatingDomainHostDelegate {
 
   Future<void> closeAll(FloatingDomainController controller);
 
+  Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch(
+    FloatingDomainController controller, {
+    required String foregroundSessionId,
+    required String targetSessionId,
+    required FloatingSessionSwitchDirection direction,
+    required bool keepForegroundAsFloating,
+  });
+
   int sessionCount(FloatingDomainController controller);
 }
 
@@ -43,6 +51,48 @@ final class FloatingDomainController {
 
   Future<void> closeAll() {
     return _delegate?.closeAll(this) ?? Future<void>.value();
+  }
+
+  Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch({
+    required String foregroundSessionId,
+    required String targetSessionId,
+    required FloatingSessionSwitchDirection direction,
+    required bool keepForegroundAsFloating,
+  }) {
+    final normalizedForegroundId = foregroundSessionId.trim();
+    final normalizedTargetId = targetSessionId.trim();
+    if (normalizedForegroundId.isEmpty) {
+      throw ArgumentError.value(
+        foregroundSessionId,
+        'foregroundSessionId',
+        'must not be empty',
+      );
+    }
+    if (normalizedTargetId.isEmpty) {
+      throw ArgumentError.value(
+        targetSessionId,
+        'targetSessionId',
+        'must not be empty',
+      );
+    }
+    if (normalizedForegroundId == normalizedTargetId) {
+      throw ArgumentError.value(
+        targetSessionId,
+        'targetSessionId',
+        'must differ from foregroundSessionId',
+      );
+    }
+    final delegate = _delegate;
+    if (delegate == null) {
+      return Future<FloatingSessionSwitchHandle?>.value();
+    }
+    return delegate.beginInteractiveSwitch(
+      this,
+      foregroundSessionId: normalizedForegroundId,
+      targetSessionId: normalizedTargetId,
+      direction: direction,
+      keepForegroundAsFloating: keepForegroundAsFloating,
+    );
   }
 
   void attachHost(FloatingDomainHostDelegate delegate) {

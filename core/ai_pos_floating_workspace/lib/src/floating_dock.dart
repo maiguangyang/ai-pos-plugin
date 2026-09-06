@@ -9,6 +9,7 @@ import 'floating_snapshot.dart';
 
 abstract interface class _FloatingDockDelegate {
   double get revealProgress;
+  Rect? cardGlobalRect(Object id);
   Future<void> collapse();
   void setApplicationActive(bool active);
 }
@@ -20,6 +21,8 @@ final class FloatingDockController extends ChangeNotifier {
 
   double get revealProgress => _revealProgress;
   bool get isExpanded => _revealProgress > 0.000001;
+
+  Rect? cardGlobalRect(Object id) => _delegate?.cardGlobalRect(id);
 
   Future<void> collapse() async => _delegate?.collapse();
 
@@ -131,6 +134,7 @@ final class _FloatingDockState extends State<FloatingDock>
   );
   late final ValueNotifier<bool> _dragging = ValueNotifier<bool>(false);
   late final ValueNotifier<double> _trackOffset = ValueNotifier<double>(0);
+  final Map<Object, GlobalKey> _cardGeometryKeys = <Object, GlobalKey>{};
   bool _applicationActive = true;
   bool _panningTrack = false;
   double _dragOriginX = 0;
@@ -163,12 +167,27 @@ final class _FloatingDockState extends State<FloatingDock>
       _reveal.value = 0;
       _trackOffset.value = 0;
     }
+    final currentIds = widget.cards.map((card) => card.id).toSet();
+    _cardGeometryKeys.removeWhere((id, _) => !currentIds.contains(id));
   }
 
   void _notifyRevealProgress() => widget.controller?._update(_reveal.value);
 
   @override
   double get revealProgress => _reveal.value;
+
+  @override
+  Rect? cardGlobalRect(Object id) {
+    final context = _cardGeometryKeys[id]?.currentContext;
+    final box = context?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) {
+      return null;
+    }
+    return Rect.fromPoints(
+      box.localToGlobal(Offset.zero),
+      box.localToGlobal(box.size.bottomRight(Offset.zero)),
+    );
+  }
 
   @override
   Future<void> collapse() => _settle(0, velocityX: 0);
@@ -423,6 +442,7 @@ final class _FloatingDockState extends State<FloatingDock>
       yield Positioned.fromRect(
         rect: finalRect,
         child: _FloatingCardProjection(
+          geometryKey: _cardGeometryKeys.putIfAbsent(card.id, GlobalKey.new),
           card: card,
           reveal: _reveal,
           dragging: _dragging,
@@ -521,6 +541,7 @@ final class _FloatingDockState extends State<FloatingDock>
 
 final class _FloatingCardProjection extends StatelessWidget {
   const _FloatingCardProjection({
+    required this.geometryKey,
     required this.card,
     required this.reveal,
     required this.dragging,
@@ -537,6 +558,7 @@ final class _FloatingCardProjection extends StatelessWidget {
     required this.onHorizontalDragCancel,
   });
 
+  final GlobalKey geometryKey;
   final FloatingDockCard card;
   final Animation<double> reveal;
   final ValueNotifier<bool> dragging;
@@ -586,20 +608,23 @@ final class _FloatingCardProjection extends StatelessWidget {
         return Transform(
           alignment: Alignment.topLeft,
           transform: transform,
-          child: GestureDetector(
-            key: FloatingDock.cardTransformKey(card.id),
-            behavior: HitTestBehavior.translucent,
-            dragStartBehavior: DragStartBehavior.down,
-            onHorizontalDragStart: onHorizontalDragStart,
-            onHorizontalDragUpdate: onHorizontalDragUpdate,
-            onHorizontalDragEnd: onHorizontalDragEnd,
-            onHorizontalDragCancel: onHorizontalDragCancel,
-            child: Opacity(
-              key: FloatingDock.cardOpacityKey(card.id),
-              opacity: cardProgress,
-              child: IgnorePointer(
-                ignoring: cardProgress < 1 || dragging.value,
-                child: child,
+          child: KeyedSubtree(
+            key: geometryKey,
+            child: GestureDetector(
+              key: FloatingDock.cardTransformKey(card.id),
+              behavior: HitTestBehavior.translucent,
+              dragStartBehavior: DragStartBehavior.down,
+              onHorizontalDragStart: onHorizontalDragStart,
+              onHorizontalDragUpdate: onHorizontalDragUpdate,
+              onHorizontalDragEnd: onHorizontalDragEnd,
+              onHorizontalDragCancel: onHorizontalDragCancel,
+              child: Opacity(
+                key: FloatingDock.cardOpacityKey(card.id),
+                opacity: cardProgress,
+                child: IgnorePointer(
+                  ignoring: cardProgress < 1 || dragging.value,
+                  child: child,
+                ),
               ),
             ),
           ),

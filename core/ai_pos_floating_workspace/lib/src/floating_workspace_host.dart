@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 
 import 'floating_dock.dart';
 import 'floating_domain_controller.dart';
+import 'floating_motion_policy.dart';
 import 'floating_session.dart';
 import 'floating_snapshot.dart';
 
@@ -44,6 +45,9 @@ final class FloatingWorkspaceHost extends StatefulWidget {
   );
   static const closeProjectionKey = Key(
     'ai-pos-floating-workspace-close-projection',
+  );
+  static const interactiveSwitchProjectionKey = Key(
+    'ai-pos-floating-workspace-interactive-switch-projection',
   );
 
   static Key foregroundSessionKey(FloatingSessionKey key) =>
@@ -85,14 +89,18 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
   final FloatingDockController _dockController = FloatingDockController();
   late final AnimationController _projectionAnimation;
   late final AnimationController _closeAnimation;
+  late final AnimationController _interactiveSettleAnimation;
+  late final FloatingMotionPolicy _motionPolicy;
   ChildBackButtonDispatcher? _childBackButtonDispatcher;
   late final ValueGetter<Future<bool>> _systemBackCallback;
   _SessionProjection? _sessionProjection;
   _CloseProjection? _closeProjection;
+  _InteractiveSwitchProjection? _interactiveSwitch;
   Future<void>? _activeTransition;
   FloatingSessionKey? _foregroundKey;
   double _dockVerticalFraction = 0.5;
   bool _disposed = false;
+  bool _interactiveSwitchStarting = false;
 
   @override
   void initState() {
@@ -100,6 +108,8 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
     _validateDomains(widget.domains);
     _projectionAnimation = AnimationController(vsync: this);
     _closeAnimation = AnimationController(vsync: this);
+    _interactiveSettleAnimation = AnimationController(vsync: this);
+    _motionPolicy = FloatingMotionPolicy();
     _systemBackCallback = _handleSystemBack;
     _attachBackButtonDispatcher(widget.backButtonDispatcher);
     WidgetsBinding.instance.addObserver(this);
@@ -205,6 +215,9 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
     }
     if (_closeAllFutures.containsKey(controller.domainId)) {
       throw StateError('The floating domain is closing all sessions.');
+    }
+    if (_interactiveSwitch != null || _interactiveSwitchStarting) {
+      throw StateError('An interactive floating switch is in progress.');
     }
     final existing = _sessions[request.key];
     if (existing != null) {
@@ -440,6 +453,14 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
   @override
   Future<void> close(FloatingDomainController controller, String sessionId) {
     _requireOwnedController(controller);
+    final interactiveSwitch = _interactiveSwitch;
+    if (interactiveSwitch != null &&
+        interactiveSwitch.foreground.request.key.domainId ==
+            controller.domainId) {
+      return interactiveSwitch.handle.cancel().then(
+        (_) => close(controller, sessionId),
+      );
+    }
     final closeAll = _closeAllFutures[controller.domainId];
     if (closeAll != null) return closeAll;
     final key = FloatingSessionKey(
@@ -453,6 +474,14 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
   @override
   Future<void> closeAll(FloatingDomainController controller) {
     _requireOwnedController(controller);
+    final interactiveSwitch = _interactiveSwitch;
+    if (interactiveSwitch != null &&
+        interactiveSwitch.foreground.request.key.domainId ==
+            controller.domainId) {
+      return interactiveSwitch.handle.cancel().then(
+        (_) => closeAll(controller),
+      );
+    }
     final current = _closeAllFutures[controller.domainId];
     if (current != null) {
       return current;
@@ -478,6 +507,288 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
         });
     _closeAllFutures[controller.domainId] = operation;
     return operation;
+  }
+
+  @override
+  Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch(
+    FloatingDomainController controller, {
+    required String foregroundSessionId,
+    required String targetSessionId,
+    required FloatingSessionSwitchDirection direction,
+    required bool keepForegroundAsFloating,
+  }) async {
+    _requireOwnedController(controller);
+    if (_disposed || !mounted || _interactiveSwitchStarting) {
+      return null;
+    }
+    final foregroundKey = FloatingSessionKey(
+      domainId: controller.domainId,
+      sessionId: foregroundSessionId,
+    );
+    final targetKey = FloatingSessionKey(
+      domainId: controller.domainId,
+      sessionId: targetSessionId,
+    );
+    final foreground = _sessions[foregroundKey];
+    final target = _sessions[targetKey];
+    if (_foregroundKey != foregroundKey ||
+        foreground == null ||
+        target == null ||
+        foreground.visibility != FloatingSessionVisibility.foreground ||
+        target.visibility != FloatingSessionVisibility.floating ||
+        target.snapshot == null ||
+        foreground.initialPresentationPending ||
+        target.initialPresentationPending ||
+        foreground.closeFuture != null ||
+        foreground.floatFuture != null ||
+        foreground.restoreFuture != null ||
+        target.closeFuture != null ||
+        target.floatFuture != null ||
+        target.restoreFuture != null ||
+        _sessionProjection != null ||
+        _closeProjection != null ||
+        _interactiveSwitch != null ||
+        _activeTransition != null ||
+        _closeAllFutures.containsKey(controller.domainId) ||
+        !_floatingOrder[controller.domainId]!.contains(targetKey) ||
+        !_presentationOrder.contains(targetKey)) {
+      return null;
+    }
+
+    _interactiveSwitchStarting = true;
+    FloatingSnapshot? foregroundSnapshot;
+    try {
+      if (keepForegroundAsFloating) {
+        foregroundSnapshot = await _captureForegroundSnapshot(foreground);
+        if (foregroundSnapshot == null) {
+          return null;
+        }
+      }
+      if (!mounted ||
+          _disposed ||
+          _foregroundKey != foregroundKey ||
+          !_isCurrent(foreground) ||
+          !_isCurrent(target) ||
+          target.visibility != FloatingSessionVisibility.floating ||
+          target.snapshot == null ||
+          _sessionProjection != null ||
+          _closeProjection != null ||
+          _interactiveSwitch != null ||
+          _activeTransition != null) {
+        foregroundSnapshot?.dispose();
+        return null;
+      }
+      final viewport = MediaQuery.sizeOf(context);
+      final reducedMotion = MediaQuery.disableAnimationsOf(context);
+      final projection = _InteractiveSwitchProjection(
+        host: this,
+        foreground: foreground,
+        target: target,
+        foregroundSnapshot: foregroundSnapshot,
+        targetSnapshot: target.snapshot!,
+        sourceRect:
+            _dockController.cardGlobalRect(target.request.key) ??
+            _dockProjectionRect(viewport),
+        viewport: viewport,
+        direction: direction,
+        keepForegroundAsFloating: keepForegroundAsFloating,
+        reducedMotion: reducedMotion,
+        targetPresentationIndex: _presentationOrder.indexOf(targetKey),
+      );
+      _interactiveSwitch = projection;
+      _presentationOrder.remove(targetKey);
+      setState(() {});
+      return projection.handle;
+    } finally {
+      _interactiveSwitchStarting = false;
+    }
+  }
+
+  void _updateInteractiveSwitchProgress(
+    _InteractiveSwitchProjection projection,
+    double value,
+  ) {
+    if (identical(_interactiveSwitch, projection) && !projection.isSettling) {
+      projection.updateProgress(value);
+    }
+  }
+
+  Future<FloatingSessionSwitchOutcome> _settleInteractiveSwitch(
+    _InteractiveSwitchProjection projection,
+    double velocityX,
+  ) async {
+    if (!identical(_interactiveSwitch, projection) || !mounted || _disposed) {
+      return FloatingSessionSwitchOutcome.cancelled;
+    }
+    final normalizedVelocity =
+        projection.direction == FloatingSessionSwitchDirection.left
+        ? velocityX
+        : -velocityX;
+    final target = _motionPolicy.targetForRelease(
+      progress: projection.progress,
+      velocityX: normalizedVelocity,
+    );
+    await _animateInteractiveSwitch(
+      projection,
+      target,
+      velocityX: normalizedVelocity,
+    );
+    if (!identical(_interactiveSwitch, projection) || !mounted || _disposed) {
+      return FloatingSessionSwitchOutcome.cancelled;
+    }
+    if (target == 0) {
+      _finishInteractiveSwitchCancellation(projection);
+      return FloatingSessionSwitchOutcome.cancelled;
+    }
+    var completed = false;
+    await _enqueueTransition(() async {
+      completed = await _finishInteractiveSwitchCompletion(projection);
+    });
+    return completed
+        ? FloatingSessionSwitchOutcome.completed
+        : FloatingSessionSwitchOutcome.cancelled;
+  }
+
+  Future<FloatingSessionSwitchOutcome> _cancelInteractiveSwitch(
+    _InteractiveSwitchProjection projection,
+  ) async {
+    if (!identical(_interactiveSwitch, projection) || !mounted || _disposed) {
+      return FloatingSessionSwitchOutcome.cancelled;
+    }
+    await _animateInteractiveSwitch(projection, 0, velocityX: 0);
+    if (identical(_interactiveSwitch, projection)) {
+      _finishInteractiveSwitchCancellation(projection);
+    }
+    return FloatingSessionSwitchOutcome.cancelled;
+  }
+
+  Future<void> _animateInteractiveSwitch(
+    _InteractiveSwitchProjection projection,
+    double target, {
+    required double velocityX,
+  }) async {
+    final begin = projection.progress;
+    if (begin == target) {
+      return;
+    }
+    _interactiveSettleAnimation
+      ..stop(canceled: true)
+      ..duration = projection.reducedMotion
+          ? const Duration(milliseconds: 120)
+          : _motionPolicy.settleDuration(
+              progress: begin,
+              target: target,
+              velocityX: velocityX,
+            )
+      ..value = 0;
+    final animation = Tween<double>(begin: begin, end: target).animate(
+      CurvedAnimation(
+        parent: _interactiveSettleAnimation,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    void update() {
+      if (identical(_interactiveSwitch, projection)) {
+        projection.updateProgress(animation.value);
+      }
+    }
+
+    animation.addListener(update);
+    try {
+      await _interactiveSettleAnimation.forward().orCancel;
+    } on TickerCanceled {
+      // Disposal or explicit cleanup owns the final projection state.
+    } finally {
+      animation.removeListener(update);
+    }
+  }
+
+  void _finishInteractiveSwitchCancellation(
+    _InteractiveSwitchProjection projection,
+  ) {
+    if (!identical(_interactiveSwitch, projection)) {
+      return;
+    }
+    _interactiveSwitch = null;
+    final insertionIndex = projection.targetPresentationIndex.clamp(
+      0,
+      _presentationOrder.length,
+    );
+    if (!_presentationOrder.contains(projection.target.request.key)) {
+      _presentationOrder.insert(insertionIndex, projection.target.request.key);
+    }
+    projection.disposeForegroundSnapshot();
+    projection.dispose();
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<bool> _finishInteractiveSwitchCompletion(
+    _InteractiveSwitchProjection projection,
+  ) async {
+    if (!identical(_interactiveSwitch, projection) ||
+        !_isCurrent(projection.foreground) ||
+        !_isCurrent(projection.target) ||
+        _foregroundKey != projection.foreground.request.key ||
+        projection.target.visibility != FloatingSessionVisibility.floating ||
+        !identical(projection.target.snapshot, projection.targetSnapshot)) {
+      if (identical(_interactiveSwitch, projection)) {
+        _finishInteractiveSwitchCancellation(projection);
+      }
+      return false;
+    }
+
+    final foreground = projection.foreground;
+    final target = projection.target;
+    final domainId = target.request.key.domainId;
+    _foregroundKey = null;
+    if (projection.keepForegroundAsFloating) {
+      final foregroundSnapshot = projection.takeForegroundSnapshot();
+      if (foregroundSnapshot == null) {
+        _finishInteractiveSwitchCancellation(projection);
+        return false;
+      }
+      foreground.reverseLaunchOrigin = null;
+      foreground.snapshot = foregroundSnapshot;
+      await _notifyVisibility(foreground, FloatingSessionVisibility.floating);
+      final order = _floatingOrder[domainId]!;
+      order.remove(foreground.request.key);
+      order.add(foreground.request.key);
+      _presentationOrder.remove(foreground.request.key);
+      _presentationOrder.add(foreground.request.key);
+    } else {
+      await _notifyVisibility(foreground, FloatingSessionVisibility.closing);
+      _floatingOrder[domainId]!.remove(foreground.request.key);
+      _presentationOrder.remove(foreground.request.key);
+      _sessions.remove(foreground.request.key);
+      try {
+        await foreground.request.onClosed(null);
+      } catch (error, stackTrace) {
+        _report(error, stackTrace, 'while closing an interactive foreground');
+      }
+      if (!foreground.completion.isCompleted) {
+        foreground.completion.complete();
+      }
+    }
+
+    _floatingOrder[domainId]!.remove(target.request.key);
+    _presentationOrder.remove(target.request.key);
+    target.snapshot = null;
+    target.reverseLaunchOrigin = null;
+    _foregroundKey = target.request.key;
+    await _notifyVisibility(target, FloatingSessionVisibility.foreground);
+
+    _interactiveSwitch = null;
+    projection.targetSnapshot.dispose();
+    projection.dispose();
+    if (mounted) {
+      setState(() {});
+    }
+    if (projection.keepForegroundAsFloating) {
+      await _evictOverflow(domainId);
+    }
+    return true;
   }
 
   @override
@@ -579,6 +890,8 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
       return current;
     }
     if (!mounted ||
+        _interactiveSwitch != null ||
+        _interactiveSwitchStarting ||
         !_isCurrent(entry) ||
         entry.visibility != FloatingSessionVisibility.foreground) {
       return Future<void>.value();
@@ -604,55 +917,13 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
 
   Future<void> _performFloat(_SessionEntry entry) async {
     entry.reverseLaunchOrigin = null;
-    await WidgetsBinding.instance.endOfFrame;
-    if (!_isCurrent(entry) ||
-        entry.visibility != FloatingSessionVisibility.foreground) {
-      return;
-    }
-    final boundary = entry.repaintBoundaryKey.currentContext
-        ?.findRenderObject();
-    if (boundary is! RenderRepaintBoundary || !boundary.hasSize) {
-      widget.onSnapshotCaptureFailed?.call(entry.request.key);
-      return;
-    }
-    FloatingSnapshot snapshot;
-    var timedOut = false;
-    final capture = Future<FloatingSnapshot>.sync(
-      () => widget.snapshotCapture(
-        boundary,
-        _capturePixelRatio(entry, boundary.size),
-      ),
-    );
-    try {
-      snapshot = await capture.timeout(
-        widget.snapshotCaptureTimeout,
-        onTimeout: () {
-          timedOut = true;
-          throw TimeoutException('Floating snapshot capture timed out.');
-        },
-      );
-    } catch (_) {
-      if (timedOut) {
-        unawaited(
-          capture.then<void>(
-            (lateSnapshot) => lateSnapshot.dispose(),
-            onError: (_, _) {},
-          ),
-        );
-      }
-      widget.onSnapshotCaptureFailed?.call(entry.request.key);
+    final snapshot = await _captureForegroundSnapshot(entry);
+    if (snapshot == null) {
       return;
     }
     if (!_isCurrent(entry) ||
         entry.visibility != FloatingSessionVisibility.foreground) {
       snapshot.dispose();
-      return;
-    }
-    final policy = _policyFor(entry.request.key.domainId);
-    if (snapshot.width > widget.snapshotPhysicalWidth ||
-        snapshot.estimatedBytes > policy.maxSnapshotBytes) {
-      snapshot.dispose();
-      widget.onSnapshotCaptureFailed?.call(entry.request.key);
       return;
     }
     entry.snapshot = snapshot;
@@ -687,6 +958,64 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
     }
     await _evictOverflow(entry.request.key.domainId);
     await _openLatestProjectionRequest(entry.request.key.domainId);
+  }
+
+  Future<FloatingSnapshot?> _captureForegroundSnapshot(
+    _SessionEntry entry,
+  ) async {
+    await WidgetsBinding.instance.endOfFrame;
+    if (!_isCurrent(entry) ||
+        entry.visibility != FloatingSessionVisibility.foreground ||
+        _foregroundKey != entry.request.key) {
+      return null;
+    }
+    final boundary = entry.repaintBoundaryKey.currentContext
+        ?.findRenderObject();
+    if (boundary is! RenderRepaintBoundary || !boundary.hasSize) {
+      widget.onSnapshotCaptureFailed?.call(entry.request.key);
+      return null;
+    }
+    var timedOut = false;
+    final capture = Future<FloatingSnapshot>.sync(
+      () => widget.snapshotCapture(
+        boundary,
+        _capturePixelRatio(entry, boundary.size),
+      ),
+    );
+    try {
+      final snapshot = await capture.timeout(
+        widget.snapshotCaptureTimeout,
+        onTimeout: () {
+          timedOut = true;
+          throw TimeoutException('Floating snapshot capture timed out.');
+        },
+      );
+      if (!_isCurrent(entry) ||
+          entry.visibility != FloatingSessionVisibility.foreground ||
+          _foregroundKey != entry.request.key) {
+        snapshot.dispose();
+        return null;
+      }
+      final policy = _policyFor(entry.request.key.domainId);
+      if (snapshot.width > widget.snapshotPhysicalWidth ||
+          snapshot.estimatedBytes > policy.maxSnapshotBytes) {
+        snapshot.dispose();
+        widget.onSnapshotCaptureFailed?.call(entry.request.key);
+        return null;
+      }
+      return snapshot;
+    } catch (_) {
+      if (timedOut) {
+        unawaited(
+          capture.then<void>(
+            (lateSnapshot) => lateSnapshot.dispose(),
+            onError: (_, _) {},
+          ),
+        );
+      }
+      widget.onSnapshotCaptureFailed?.call(entry.request.key);
+      return null;
+    }
   }
 
   Future<void> _openLatestProjectionRequest(String domainId) async {
@@ -800,6 +1129,9 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
   }
 
   Future<void> _restore(_SessionEntry entry, {Rect? sourceRect}) {
+    if (_interactiveSwitch != null || _interactiveSwitchStarting) {
+      return Future<void>.value();
+    }
     final current = entry.restoreFuture;
     if (current != null) return current;
     final operation = _enqueueTransition(
@@ -1092,6 +1424,11 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
   }
 
   Future<bool> _handleSystemBack() async {
+    final interactiveSwitch = _interactiveSwitch;
+    if (interactiveSwitch != null) {
+      await interactiveSwitch.handle.cancel();
+      return true;
+    }
     if (_sessionProjection != null || _closeProjection != null) {
       return true;
     }
@@ -1115,7 +1452,8 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
     final blocksChild =
         _foregroundEntry != null ||
         _sessionProjection != null ||
-        _closeProjection != null;
+        _closeProjection != null ||
+        _interactiveSwitch != null;
     final content = Stack(
       fit: StackFit.expand,
       children: [
@@ -1150,6 +1488,8 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
           _buildSessionProjection(projection),
         if (_closeProjection case final projection?)
           _buildCloseProjection(projection),
+        if (_interactiveSwitch case final projection?)
+          _buildInteractiveSwitchProjection(projection),
       ],
     );
     return PopScope<void>(
@@ -1177,7 +1517,8 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
       child: IgnorePointer(
         child: AnimatedBuilder(
           animation: _projectionAnimation,
-          builder: (context, _) {
+          child: projection.snapshot.build(fit: BoxFit.fill),
+          builder: (context, child) {
             final rawProgress = _projectionAnimation.value;
             final progress = projection.reducedMotion
                 ? rawProgress
@@ -1195,27 +1536,14 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
                 : isOpening && projection.startRect != projection.endRect
                 ? rawProgress
                 : 1.0;
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                Positioned.fromRect(
-                  rect: rect,
-                  child: Opacity(
-                    opacity: opacity,
-                    child: PhysicalModel(
-                      color: Theme.of(context).colorScheme.surface,
-                      elevation: projection.reducedMotion ? 0 : 12,
-                      borderRadius: BorderRadius.circular(
-                        projection.reducedMotion
-                            ? 0
-                            : 18 * (isFloating ? progress : 1 - progress),
-                      ),
-                      clipBehavior: Clip.antiAlias,
-                      child: projection.snapshot.build(fit: BoxFit.fill),
-                    ),
-                  ),
-                ),
-              ],
+            final cardProgress = isFloating ? progress : 1 - progress;
+            return _buildSnapshotProjectionSurface(
+              context: context,
+              rect: rect,
+              opacity: opacity,
+              radius: projection.reducedMotion ? 0 : 18 * cardProgress,
+              elevation: projection.reducedMotion ? 0 : 12 * cardProgress,
+              child: child!,
             );
           },
         ),
@@ -1284,6 +1612,68 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
     );
   }
 
+  Widget _buildInteractiveSwitchProjection(
+    _InteractiveSwitchProjection projection,
+  ) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedBuilder(
+          animation: projection,
+          child: projection.targetSnapshot.build(fit: BoxFit.fill),
+          builder: (context, child) {
+            final progress = projection.progress;
+            final rect = projection.reducedMotion
+                ? Offset.zero & projection.viewport
+                : Rect.lerp(
+                    projection.sourceRect,
+                    Offset.zero & projection.viewport,
+                    progress,
+                  )!;
+            return _buildSnapshotProjectionSurface(
+              context: context,
+              key: FloatingWorkspaceHost.interactiveSwitchProjectionKey,
+              rect: rect,
+              opacity: projection.reducedMotion ? progress : 1,
+              radius: projection.reducedMotion ? 0 : 18 * (1 - progress),
+              elevation: projection.reducedMotion ? 0 : 12 * (1 - progress),
+              child: child!,
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSnapshotProjectionSurface({
+    required BuildContext context,
+    required Rect rect,
+    required double opacity,
+    required double radius,
+    required double elevation,
+    required Widget child,
+    Key? key,
+  }) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned.fromRect(
+          rect: rect,
+          child: Opacity(
+            opacity: opacity,
+            child: PhysicalModel(
+              key: key,
+              color: Theme.of(context).colorScheme.surface,
+              elevation: elevation,
+              borderRadius: BorderRadius.circular(radius),
+              clipBehavior: Clip.antiAlias,
+              child: child,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildSession(_SessionEntry entry) {
     final foreground = entry.visibility == FloatingSessionVisibility.foreground;
     return Offstage(
@@ -1343,6 +1733,11 @@ final class _FloatingWorkspaceHostState extends State<FloatingWorkspaceHost>
     }
     _projectionAnimation.dispose();
     _closeAnimation.dispose();
+    _interactiveSettleAnimation.dispose();
+    final interactiveSwitch = _interactiveSwitch;
+    _interactiveSwitch = null;
+    interactiveSwitch?.disposeForegroundSnapshot();
+    interactiveSwitch?.dispose();
     _closeProjection?.snapshot.dispose();
     _closeProjection = null;
     for (final domain in widget.domains) {
@@ -1472,6 +1867,92 @@ final class _SessionProjection {
   final Rect endRect;
   final _SessionProjectionKind kind;
   final bool reducedMotion;
+}
+
+final class _InteractiveSwitchProjection extends ChangeNotifier {
+  _InteractiveSwitchProjection({
+    required this.host,
+    required this.foreground,
+    required this.target,
+    required FloatingSnapshot? foregroundSnapshot,
+    required this.targetSnapshot,
+    required this.sourceRect,
+    required this.viewport,
+    required this.direction,
+    required this.keepForegroundAsFloating,
+    required this.reducedMotion,
+    required this.targetPresentationIndex,
+  }) : _foregroundSnapshot = foregroundSnapshot {
+    handle = _InteractiveSwitchHandle(this);
+  }
+
+  final _FloatingWorkspaceHostState host;
+  final _SessionEntry foreground;
+  final _SessionEntry target;
+  FloatingSnapshot? _foregroundSnapshot;
+  final FloatingSnapshot targetSnapshot;
+  final Rect sourceRect;
+  final Size viewport;
+  final FloatingSessionSwitchDirection direction;
+  final bool keepForegroundAsFloating;
+  final bool reducedMotion;
+  final int targetPresentationIndex;
+  late final _InteractiveSwitchHandle handle;
+  double _progress = 0;
+
+  double get progress => _progress;
+  bool get isSettling => handle.isSettling;
+
+  void updateProgress(double value) {
+    final next = value.clamp(0.0, 1.0);
+    if (_progress == next) {
+      return;
+    }
+    _progress = next;
+    notifyListeners();
+  }
+
+  FloatingSnapshot? takeForegroundSnapshot() {
+    final snapshot = _foregroundSnapshot;
+    _foregroundSnapshot = null;
+    return snapshot;
+  }
+
+  void disposeForegroundSnapshot() {
+    takeForegroundSnapshot()?.dispose();
+  }
+}
+
+final class _InteractiveSwitchHandle implements FloatingSessionSwitchHandle {
+  _InteractiveSwitchHandle(this.projection);
+
+  final _InteractiveSwitchProjection projection;
+  Future<FloatingSessionSwitchOutcome>? _terminalFuture;
+
+  bool get isSettling => _terminalFuture != null;
+
+  @override
+  double get progress => projection.progress;
+
+  @override
+  void updateProgress(double value) {
+    projection.host._updateInteractiveSwitchProgress(projection, value);
+  }
+
+  @override
+  Future<FloatingSessionSwitchOutcome> settle({required double velocityX}) {
+    return _terminalFuture ??= projection.host._settleInteractiveSwitch(
+      projection,
+      velocityX,
+    );
+  }
+
+  @override
+  Future<void> cancel() {
+    return (_terminalFuture ??= projection.host._cancelInteractiveSwitch(
+      projection,
+    )).then<void>((_) {});
+  }
 }
 
 final class _CloseProjection {

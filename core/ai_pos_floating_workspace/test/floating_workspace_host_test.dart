@@ -6,6 +6,523 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('interactive restore follows raw progress without recapture', (
+    tester,
+  ) async {
+    var captureCount = 0;
+    final harness = await _pumpHost(
+      tester,
+      capture: (boundary, pixelRatio) async {
+        captureCount += 1;
+        return _capture(boundary, pixelRatio);
+      },
+    );
+    unawaited(harness.agent.open(_request('agent', 'a')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('float-session')));
+    await tester.pumpAndSettle();
+    unawaited(harness.agent.open(_request('agent', 'b')));
+    await tester.pumpAndSettle();
+    final targetKey = const FloatingSessionKey(
+      domainId: 'agent',
+      sessionId: 'a',
+    );
+    final targetRect = tester.getRect(
+      find.byKey(FloatingDock.cardTransformKey(targetKey)),
+    );
+    final capturesBeforeDrag = captureCount;
+
+    final handle = await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: false,
+    );
+    expect(handle, isNotNull);
+    handle!.updateProgress(0.35);
+    await tester.pump();
+
+    final viewport = tester.view.physicalSize / tester.view.devicePixelRatio;
+    final expected = Rect.lerp(targetRect, Offset.zero & viewport, 0.35)!;
+    _expectRectClose(
+      tester.getRect(
+        find.byKey(FloatingWorkspaceHost.interactiveSwitchProjectionKey),
+      ),
+      expected,
+      epsilon: 0.01,
+    );
+    expect(find.byKey(FloatingDock.cardKey(targetKey)), findsNothing);
+    expect(handle.progress, 0.35);
+    expect(captureCount, capturesBeforeDrag);
+
+    handle.updateProgress(-1);
+    expect(handle.progress, 0);
+    handle.updateProgress(2);
+    expect(handle.progress, 1);
+    expect(captureCount, capturesBeforeDrag);
+
+    final cancel = handle.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+    expect(
+      find.byKey(
+        FloatingWorkspaceHost.foregroundSessionKey(
+          const FloatingSessionKey(domainId: 'agent', sessionId: 'b'),
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(FloatingDock.cardKey(targetKey)), findsOneWidget);
+  });
+
+  testWidgets('interactive completion closes an empty foreground', (
+    tester,
+  ) async {
+    var disposedSnapshots = 0;
+    var closedForeground = 0;
+    final harness = await _pumpHost(
+      tester,
+      capture: (boundary, pixelRatio) async => FloatingSnapshot.memory(
+        width: 100,
+        height: 160,
+        builder: ({key, required fit}) =>
+            ColoredBox(key: key, color: Colors.blue),
+        onDispose: () => disposedSnapshots += 1,
+      ),
+    );
+    unawaited(harness.agent.open(_request('agent', 'a')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('float-session')));
+    await tester.pumpAndSettle();
+    unawaited(
+      harness.agent.open(
+        _request('agent', 'b', onClosed: (_) => closedForeground += 1),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final handle = (await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: false,
+    ))!;
+    handle.updateProgress(0.75);
+    final settle = handle.settle(velocityX: 0);
+    expect(handle.settle(velocityX: -3000), same(settle));
+    await tester.pumpAndSettle();
+
+    expect(await settle, FloatingSessionSwitchOutcome.completed);
+    expect(closedForeground, 1);
+    expect(disposedSnapshots, 1);
+    expect(harness.agent.sessionCount, 1);
+    expect(
+      find.byKey(
+        FloatingWorkspaceHost.foregroundSessionKey(
+          const FloatingSessionKey(domainId: 'agent', sessionId: 'a'),
+        ),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'interactive completion retains a conversed foreground as newest',
+    (tester) async {
+      final disposedCaptureIndexes = <int>[];
+      var captureIndex = 0;
+      final harness = await _pumpHost(
+        tester,
+        capture: (boundary, pixelRatio) async {
+          final index = captureIndex++;
+          return FloatingSnapshot.memory(
+            width: 100,
+            height: 160,
+            builder: ({key, required fit}) =>
+                ColoredBox(key: key, color: Colors.blue),
+            onDispose: () => disposedCaptureIndexes.add(index),
+          );
+        },
+      );
+      unawaited(harness.agent.open(_request('agent', 'a')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('float-session')));
+      await tester.pumpAndSettle();
+      unawaited(harness.agent.open(_request('agent', 'b')));
+      await tester.pumpAndSettle();
+
+      final begin = harness.agent.beginInteractiveSwitch(
+        foregroundSessionId: 'b',
+        targetSessionId: 'a',
+        direction: FloatingSessionSwitchDirection.right,
+        keepForegroundAsFloating: true,
+      );
+      await tester.pump();
+      final handle = (await begin)!;
+      expect(captureIndex, 2);
+      handle.updateProgress(0.75);
+      final settle = handle.settle(velocityX: 0);
+      await tester.pumpAndSettle();
+
+      expect(await settle, FloatingSessionSwitchOutcome.completed);
+      expect(disposedCaptureIndexes, [0]);
+      expect(harness.agent.sessionCount, 2);
+      expect(
+        tester
+            .widget<FloatingDock>(find.byType(FloatingDock))
+            .cards
+            .map((card) => card.id),
+        [const FloatingSessionKey(domainId: 'agent', sessionId: 'b')],
+      );
+      expect(
+        find.byKey(
+          FloatingWorkspaceHost.foregroundSessionKey(
+            const FloatingSessionKey(domainId: 'agent', sessionId: 'a'),
+          ),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('interactive switch rejects invalid and overlapping starts', (
+    tester,
+  ) async {
+    final harness = await _pumpHost(tester);
+    await _openFloatingThenForeground(tester, harness.agent);
+
+    expect(
+      await harness.agent.beginInteractiveSwitch(
+        foregroundSessionId: 'a',
+        targetSessionId: 'b',
+        direction: FloatingSessionSwitchDirection.left,
+        keepForegroundAsFloating: false,
+      ),
+      isNull,
+    );
+    expect(
+      await harness.agent.beginInteractiveSwitch(
+        foregroundSessionId: 'b',
+        targetSessionId: 'missing',
+        direction: FloatingSessionSwitchDirection.left,
+        keepForegroundAsFloating: false,
+      ),
+      isNull,
+    );
+
+    final handle = await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: false,
+    );
+    expect(handle, isNotNull);
+    expect(
+      await harness.agent.beginInteractiveSwitch(
+        foregroundSessionId: 'b',
+        targetSessionId: 'a',
+        direction: FloatingSessionSwitchDirection.right,
+        keepForegroundAsFloating: false,
+      ),
+      isNull,
+    );
+    final cancel = handle!.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+    expect(harness.agent.sessionCount, 2);
+  });
+
+  testWidgets('direction-normalized velocity completes a short restore', (
+    tester,
+  ) async {
+    for (final direction in FloatingSessionSwitchDirection.values) {
+      final harness = await _pumpHost(tester);
+      await _openFloatingThenForeground(tester, harness.agent);
+      final handle = (await harness.agent.beginInteractiveSwitch(
+        foregroundSessionId: 'b',
+        targetSessionId: 'a',
+        direction: direction,
+        keepForegroundAsFloating: false,
+      ))!;
+      handle.updateProgress(0.2);
+      final settle = handle.settle(
+        velocityX: direction == FloatingSessionSwitchDirection.left
+            ? -2000
+            : 2000,
+      );
+      await tester.pumpAndSettle();
+      expect(await settle, FloatingSessionSwitchOutcome.completed);
+      final closeAll = harness.agent.closeAll();
+      await tester.pumpAndSettle();
+      await closeAll;
+    }
+  });
+
+  testWidgets('closeAll cancels an interactive switch before cleanup', (
+    tester,
+  ) async {
+    var captureIndex = 0;
+    final disposedCaptureIndexes = <int>[];
+    final harness = await _pumpHost(
+      tester,
+      capture: (boundary, pixelRatio) async {
+        final index = captureIndex++;
+        return FloatingSnapshot.memory(
+          width: 100,
+          height: 160,
+          builder: ({key, required fit}) =>
+              ColoredBox(key: key, color: Colors.blue),
+          onDispose: () => disposedCaptureIndexes.add(index),
+        );
+      },
+    );
+    await _openFloatingThenForeground(tester, harness.agent);
+    final begin = harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: true,
+    );
+    await tester.pump();
+    final handle = (await begin)!..updateProgress(0.4);
+
+    final closeAll = harness.agent.closeAll();
+    await tester.pumpAndSettle();
+    await closeAll;
+
+    expect(harness.agent.sessionCount, 0);
+    expect(
+      find.byKey(FloatingWorkspaceHost.interactiveSwitchProjectionKey),
+      findsNothing,
+    );
+    expect(disposedCaptureIndexes, unorderedEquals([0, 1, 2]));
+    expect(disposedCaptureIndexes.toSet(), hasLength(3));
+    expect(
+      await handle.settle(velocityX: -2000),
+      FloatingSessionSwitchOutcome.cancelled,
+    );
+  });
+
+  testWidgets('slow release below threshold returns target to its card', (
+    tester,
+  ) async {
+    final harness = await _pumpHost(tester);
+    await _openFloatingThenForeground(tester, harness.agent);
+    final handle = (await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: false,
+    ))!;
+    handle.updateProgress(0.49);
+
+    final settle = handle.settle(velocityX: 0);
+    await tester.pumpAndSettle();
+
+    expect(await settle, FloatingSessionSwitchOutcome.cancelled);
+    expect(harness.agent.sessionCount, 2);
+    expect(
+      find.byKey(
+        FloatingWorkspaceHost.foregroundSessionKey(
+          const FloatingSessionKey(domainId: 'agent', sessionId: 'b'),
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(
+        FloatingDock.cardKey(
+          const FloatingSessionKey(domainId: 'agent', sessionId: 'a'),
+        ),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('closing during an interactive switch cancels it first', (
+    tester,
+  ) async {
+    final harness = await _pumpHost(tester);
+    await _openFloatingThenForeground(tester, harness.agent);
+    final handle = (await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: false,
+    ))!..updateProgress(0.4);
+
+    final close = harness.agent.close('b');
+    await tester.pumpAndSettle();
+    await close;
+
+    expect(harness.agent.sessionCount, 1);
+    expect(
+      await handle.settle(velocityX: -2000),
+      FloatingSessionSwitchOutcome.cancelled,
+    );
+    expect(
+      find.byKey(FloatingWorkspaceHost.interactiveSwitchProjectionKey),
+      findsNothing,
+    );
+    expect(
+      find.byKey(
+        FloatingDock.cardKey(
+          const FloatingSessionKey(domainId: 'agent', sessionId: 'a'),
+        ),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('reduced motion maps progress to full-screen opacity', (
+    tester,
+  ) async {
+    final harness = await _pumpHost(tester, disableAnimations: true);
+    await _openFloatingThenForeground(tester, harness.agent);
+    final handle = (await harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: false,
+    ))!..updateProgress(0.4);
+    await tester.pump();
+
+    final projection = find.byKey(
+      FloatingWorkspaceHost.interactiveSwitchProjectionKey,
+    );
+    expect(
+      tester.getRect(projection),
+      Offset.zero & (tester.view.physicalSize / tester.view.devicePixelRatio),
+    );
+    final opacity = tester.widget<Opacity>(
+      find.ancestor(of: projection, matching: find.byType(Opacity)).first,
+    );
+    expect(opacity.opacity, 0.4);
+
+    final cancel = handle.cancel();
+    await tester.pumpAndSettle();
+    await cancel;
+  });
+
+  testWidgets('timed out interactive capture disposes its late snapshot', (
+    tester,
+  ) async {
+    final lateCapture = Completer<FloatingSnapshot>();
+    final captureFailures = <FloatingSessionKey>[];
+    var captureCount = 0;
+    var lateDisposeCount = 0;
+    final harness = await _pumpHost(
+      tester,
+      captureTimeout: const Duration(milliseconds: 10),
+      onCaptureFailed: captureFailures.add,
+      capture: (boundary, pixelRatio) {
+        captureCount += 1;
+        if (captureCount == 1) {
+          return _capture(boundary, pixelRatio);
+        }
+        return lateCapture.future;
+      },
+    );
+    await _openFloatingThenForeground(tester, harness.agent);
+
+    final begin = harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: true,
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 11));
+    expect(await begin, isNull);
+    lateCapture.complete(
+      FloatingSnapshot.memory(
+        width: 100,
+        height: 160,
+        builder: ({key, required fit}) =>
+            ColoredBox(key: key, color: Colors.blue),
+        onDispose: () => lateDisposeCount += 1,
+      ),
+    );
+    await tester.pump();
+
+    expect(lateDisposeCount, 1);
+    expect(captureFailures, [
+      const FloatingSessionKey(domainId: 'agent', sessionId: 'b'),
+    ]);
+    expect(harness.agent.sessionCount, 2);
+  });
+
+  testWidgets(
+    'system back cancels interactive restore without closing source',
+    (tester) async {
+      final harness = await _pumpHost(tester);
+      await _openFloatingThenForeground(tester, harness.agent);
+      final handle = (await harness.agent.beginInteractiveSwitch(
+        foregroundSessionId: 'b',
+        targetSessionId: 'a',
+        direction: FloatingSessionSwitchDirection.left,
+        keepForegroundAsFloating: false,
+      ))!..updateProgress(0.4);
+
+      final handled = tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
+      expect(await handled, isTrue);
+      expect(harness.agent.sessionCount, 2);
+      expect(
+        await handle.settle(velocityX: -2000),
+        FloatingSessionSwitchOutcome.cancelled,
+      );
+      expect(
+        find.byKey(
+          FloatingWorkspaceHost.foregroundSessionKey(
+            const FloatingSessionKey(domainId: 'agent', sessionId: 'b'),
+          ),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('disposing host releases interactive snapshots exactly once', (
+    tester,
+  ) async {
+    var captureIndex = 0;
+    final disposedCaptureIndexes = <int>[];
+    final harness = await _pumpHost(
+      tester,
+      capture: (boundary, pixelRatio) async {
+        final index = captureIndex++;
+        return FloatingSnapshot.memory(
+          width: 100,
+          height: 160,
+          builder: ({key, required fit}) =>
+              ColoredBox(key: key, color: Colors.blue),
+          onDispose: () => disposedCaptureIndexes.add(index),
+        );
+      },
+    );
+    await _openFloatingThenForeground(tester, harness.agent);
+    final begin = harness.agent.beginInteractiveSwitch(
+      foregroundSessionId: 'b',
+      targetSessionId: 'a',
+      direction: FloatingSessionSwitchDirection.left,
+      keepForegroundAsFloating: true,
+    );
+    await tester.pump();
+    final handle = (await begin)!..updateProgress(0.4);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+
+    expect(disposedCaptureIndexes, unorderedEquals([0, 1]));
+    expect(disposedCaptureIndexes.toSet(), hasLength(2));
+    expect(
+      await handle.settle(velocityX: -2000),
+      FloatingSessionSwitchOutcome.cancelled,
+    );
+  });
+
   testWidgets('default request opens immediately without initial projection', (
     tester,
   ) async {
@@ -1119,6 +1636,18 @@ Future<FloatingSnapshot> _capture(
     builder: ({key, required fit}) => ColoredBox(key: key, color: Colors.blue),
     onDispose: () {},
   );
+}
+
+Future<void> _openFloatingThenForeground(
+  WidgetTester tester,
+  FloatingDomainController controller,
+) async {
+  unawaited(controller.open(_request(controller.domainId, 'a')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('float-session')));
+  await tester.pumpAndSettle();
+  unawaited(controller.open(_request(controller.domainId, 'b')));
+  await tester.pumpAndSettle();
 }
 
 void _expectRectClose(Rect actual, Rect expected, {double epsilon = 1}) {

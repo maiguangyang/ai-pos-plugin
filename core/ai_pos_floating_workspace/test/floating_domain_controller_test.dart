@@ -2,6 +2,66 @@ import 'package:ai_pos_floating_workspace/ai_pos_floating_workspace.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'interactive switch forwards normalized ids and options to host',
+    () async {
+      final controller = _controller();
+      final delegate = _RecordingDomainHost();
+      controller.attachHost(delegate);
+
+      final result = await controller.beginInteractiveSwitch(
+        foregroundSessionId: '  agent-c  ',
+        targetSessionId: ' agent-b ',
+        direction: FloatingSessionSwitchDirection.right,
+        keepForegroundAsFloating: true,
+      );
+
+      expect(delegate.controller, same(controller));
+      expect(delegate.foregroundSessionId, 'agent-c');
+      expect(delegate.targetSessionId, 'agent-b');
+      expect(delegate.direction, FloatingSessionSwitchDirection.right);
+      expect(delegate.keepForegroundAsFloating, isTrue);
+      expect(result, same(delegate.handle));
+    },
+  );
+
+  test(
+    'interactive switch returns null while controller is detached',
+    () async {
+      final result = await _controller().beginInteractiveSwitch(
+        foregroundSessionId: 'agent-c',
+        targetSessionId: 'agent-b',
+        direction: FloatingSessionSwitchDirection.left,
+        keepForegroundAsFloating: false,
+      );
+
+      expect(result, isNull);
+    },
+  );
+
+  test('interactive switch rejects empty or identical session ids', () {
+    final controller = _controller();
+
+    expect(
+      () => controller.beginInteractiveSwitch(
+        foregroundSessionId: ' ',
+        targetSessionId: 'agent-b',
+        direction: FloatingSessionSwitchDirection.left,
+        keepForegroundAsFloating: false,
+      ),
+      throwsArgumentError,
+    );
+    expect(
+      () => controller.beginInteractiveSwitch(
+        foregroundSessionId: 'agent-a',
+        targetSessionId: ' agent-a ',
+        direction: FloatingSessionSwitchDirection.right,
+        keepForegroundAsFloating: true,
+      ),
+      throwsArgumentError,
+    );
+  });
+
   test('controller rejects another domain and detaches cleanly', () {
     final controller = FloatingDomainController(
       policy: const FloatingDomainPolicy(
@@ -33,4 +93,77 @@ void main() {
       isNot(const FloatingSessionKey(domainId: 'plugin', sessionId: 'a')),
     );
   });
+}
+
+FloatingDomainController _controller() {
+  return FloatingDomainController(
+    policy: const FloatingDomainPolicy(
+      domainId: 'agent',
+      maxFloatingSessions: 5,
+      maxSnapshotBytes: 1024,
+    ),
+  );
+}
+
+final class _RecordingDomainHost implements FloatingDomainHostDelegate {
+  final handle = _FakeSwitchHandle();
+  FloatingDomainController? controller;
+  String? foregroundSessionId;
+  String? targetSessionId;
+  FloatingSessionSwitchDirection? direction;
+  bool? keepForegroundAsFloating;
+
+  @override
+  Future<FloatingSessionSwitchHandle?> beginInteractiveSwitch(
+    FloatingDomainController controller, {
+    required String foregroundSessionId,
+    required String targetSessionId,
+    required FloatingSessionSwitchDirection direction,
+    required bool keepForegroundAsFloating,
+  }) async {
+    this.controller = controller;
+    this.foregroundSessionId = foregroundSessionId;
+    this.targetSessionId = targetSessionId;
+    this.direction = direction;
+    this.keepForegroundAsFloating = keepForegroundAsFloating;
+    return handle;
+  }
+
+  @override
+  Future<void> close(
+    FloatingDomainController controller,
+    String sessionId,
+  ) async {}
+
+  @override
+  Future<void> closeAll(FloatingDomainController controller) async {}
+
+  @override
+  Future<Object?> open(
+    FloatingDomainController controller,
+    FloatingSessionRequest request,
+  ) async => null;
+
+  @override
+  int sessionCount(FloatingDomainController controller) => 0;
+}
+
+final class _FakeSwitchHandle implements FloatingSessionSwitchHandle {
+  @override
+  double progress = 0;
+
+  @override
+  Future<void> cancel() async {}
+
+  @override
+  Future<FloatingSessionSwitchOutcome> settle({
+    required double velocityX,
+  }) async {
+    return FloatingSessionSwitchOutcome.completed;
+  }
+
+  @override
+  void updateProgress(double value) {
+    progress = value;
+  }
 }

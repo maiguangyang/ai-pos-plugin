@@ -3,6 +3,38 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'controller reports transformed card geometry in every dock state',
+    (tester) async {
+      final controller = FloatingDockController();
+      addTearDown(controller.dispose);
+      await _pumpDock(
+        tester,
+        cards: _cards(3),
+        controller: controller,
+        size: const Size(240, 600),
+      );
+
+      Rect renderedRect(String id) =>
+          tester.getRect(find.byKey(FloatingDock.cardTransformKey(id)));
+
+      expect(controller.cardGlobalRect('session-2'), renderedRect('session-2'));
+      expect(controller.cardGlobalRect('missing'), isNull);
+
+      await tester.tap(find.byKey(FloatingDock.dockHitTargetKey));
+      await tester.pumpAndSettle();
+      expect(controller.cardGlobalRect('session-2'), renderedRect('session-2'));
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(FloatingDock.cardKey('session-2'))),
+      );
+      await gesture.moveBy(const Offset(-80, 0));
+      await tester.pump();
+      expect(controller.cardGlobalRect('session-2'), renderedRect('session-2'));
+      await gesture.up();
+    },
+  );
+
   testWidgets('dock exposes semantics and restores the selected card', (
     tester,
   ) async {
@@ -236,6 +268,7 @@ Future<void> _pumpDock(
   required List<FloatingDockCard> cards,
   EdgeInsets padding = EdgeInsets.zero,
   Size size = const Size(800, 600),
+  FloatingDockController? controller,
 }) {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -245,7 +278,9 @@ Future<void> _pumpDock(
     MaterialApp(
       home: MediaQuery(
         data: MediaQueryData(size: size, padding: padding),
-        child: Scaffold(body: FloatingDock(cards: cards)),
+        child: Scaffold(
+          body: FloatingDock(cards: cards, controller: controller),
+        ),
       ),
     ),
   );

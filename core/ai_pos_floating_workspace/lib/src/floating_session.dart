@@ -4,6 +4,20 @@ import 'package:flutter/widgets.dart';
 
 enum FloatingSessionVisibility { foreground, floating, closing }
 
+enum FloatingSessionSwitchDirection { left, right }
+
+enum FloatingSessionSwitchOutcome { completed, cancelled }
+
+abstract interface class FloatingSessionSwitchHandle {
+  double get progress;
+
+  void updateProgress(double value);
+
+  Future<FloatingSessionSwitchOutcome> settle({required double velocityX});
+
+  Future<void> cancel();
+}
+
 @immutable
 final class FloatingSessionKey {
   const FloatingSessionKey({required this.domainId, required this.sessionId});
